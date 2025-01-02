@@ -12,17 +12,15 @@ use reqwest::Client;
 use std::{time::Duration, path::PathBuf, io::Cursor};
 use rocket::data::ToByteUnit;
 
-// Define AppState struct at the top level
 struct AppState {
     client: Client,
 }
 
-// Custom response struct to handle headers and content type
 struct ProxyResponse {
     status: Status,
     content_type: String,
     body: Vec<u8>,
-    headers: Vec<Header<'static>>,
+    headers: Vec<(String, String)>,
 }
 
 impl<'r> rocket::response::Responder<'r, 'static> for ProxyResponse {
@@ -31,80 +29,60 @@ impl<'r> rocket::response::Responder<'r, 'static> for ProxyResponse {
         response.sized_body(self.body.len(), Cursor::new(self.body));
         response.status(self.status);
         
-        // Set content type
-        if let Ok(ct) = ContentType::parse_flexible(&self.content_type) {
-            response.header(ct);
-        }
+        ContentType::parse_flexible(&self.content_type)
+            .map(|ct| response.header(ct));
 
-        // Add other headers
-        for header in self.headers {
-            response.header(header);
+        for (name, value) in self.headers {
+            response.header(Header::new(name, value));
         }
 
         response.ok()
     }
 }
 
-#[get("/<path..>?<query..>")]
+#[get("/<path..>")]
 async fn get_request(
     path: PathBuf,
-    query: Option<rocket::http::uri::Query<'_>>,
-    headers: &rocket::http::HeaderMap<'_>,
     state: &State<AppState>,
 ) -> Result<ProxyResponse, status::Custom<String>> {
-    handle_request(Method::Get, path, query, headers, None, state).await
+    handle_request(Method::Get, path, None, state).await
 }
 
-#[post("/<path..>?<query..>", data = "<data>")]
+#[post("/<path..>", data = "<data>")]
 async fn post_request(
     path: PathBuf,
-    query: Option<rocket::http::uri::Query<'_>>,
-    headers: &rocket::http::HeaderMap<'_>,
     data: Data<'_>,
     state: &State<AppState>,
 ) -> Result<ProxyResponse, status::Custom<String>> {
-    handle_request(Method::Post, path, query, headers, Some(data), state).await
+    handle_request(Method::Post, path, Some(data), state).await
 }
 
-#[put("/<path..>?<query..>", data = "<data>")]
+#[put("/<path..>", data = "<data>")]
 async fn put_request(
     path: PathBuf,
-    query: Option<rocket::http::uri::Query<'_>>,
-    headers: &rocket::http::HeaderMap<'_>,
     data: Data<'_>,
     state: &State<AppState>,
 ) -> Result<ProxyResponse, status::Custom<String>> {
-    handle_request(Method::Put, path, query, headers, Some(data), state).await
+    handle_request(Method::Put, path, Some(data), state).await
 }
 
-#[delete("/<path..>?<query..>")]
+#[delete("/<path..>")]
 async fn delete_request(
     path: PathBuf,
-    query: Option<rocket::http::uri::Query<'_>>,
-    headers: &rocket::http::HeaderMap<'_>,
     state: &State<AppState>,
 ) -> Result<ProxyResponse, status::Custom<String>> {
-    handle_request(Method::Delete, path, query, headers, None, state).await
+    handle_request(Method::Delete, path, None, state).await
 }
 
-// Shared request handling logic
 async fn handle_request(
     method: Method,
     path: PathBuf,
-    query: Option<rocket::http::uri::Query<'_>>,
-    headers: &rocket::http::HeaderMap<'_>,
     data: Option<Data<'_>>,
     state: &State<AppState>,
 ) -> Result<ProxyResponse, status::Custom<String>> {
     let path_str = path.to_string_lossy();
     let mut url = format!("https://www.roblox.com/{}", path_str);
     
-    // Add query parameters if present
-    if let Some(q) = query {
-        url.push('?');
-        url.push_str(q.as_str());
-    }
-
     // Build the request based on the incoming method
     let mut request_builder = match method {
         Method::Get => state.client.get(&url),
@@ -116,13 +94,6 @@ async fn handle_request(
             "Method not supported".into()
         )),
     };
-
-    // Forward headers except some specific ones we want to exclude
-    for header in headers.iter() {
-        if !["host", "connection", "content-length"].contains(&header.name().as_str().to_lowercase().as_str()) {
-            request_builder = request_builder.header(header.name().as_str(), header.value());
-        }
-    }
 
     // Handle request body for methods that support it
     if let Some(data) = data {
@@ -164,12 +135,13 @@ async fn handle_request(
         .unwrap_or("application/octet-stream")
         .to_string();
 
-    // Convert response headers to Rocket headers
+    // Store headers for forwarding
     let mut response_headers = Vec::new();
-    for (name, value) in response.headers() {
-        if let Ok(header_value) = value.to_str() {
+    let headers = response.headers().clone();
+    for (name, value) in headers.iter() {
+        if let Ok(value_str) = value.to_str() {
             if !["connection", "transfer-encoding"].contains(&name.as_str()) {
-                response_headers.push(Header::new(name.as_str(), header_value));
+                response_headers.push((name.as_str().to_string(), value_str.to_string()));
             }
         }
     }
@@ -192,7 +164,6 @@ async fn handle_request(
 
 #[shuttle_runtime::main]
 async fn main() -> shuttle_rocket::ShuttleRocket {
-    // Create a client with more detailed configuration
     let client = Client::builder()
         .pool_idle_timeout(Duration::from_secs(15))
         .pool_max_idle_per_host(10)
