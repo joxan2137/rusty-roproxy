@@ -3,9 +3,14 @@ name = "rusty-roproxy"
 version = "0.1.0"
 edition = "2021"
 
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
 [dependencies]
-rocket = "0.5.0"
-shuttle-rocket = "0.49.0"
-shuttle-runtime = "0.49.0"
-tokio = "1.26.0"
+rocket = { version = "0.5.0-rc.3", features = ["json"] }
+shuttle-rocket = "0.31.0"
+shuttle-runtime = "0.31.0"
+tokio = { version = "1.29.1", features = ["full"] }
 reqwest = "*"
+tracing = "*"
+tracing-subscriber = { version = "*", features = ["env-filter"] }
+anyhow = "*"
