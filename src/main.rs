@@ -240,7 +240,6 @@ async fn handle_request(
 // Shuttle integration
 #[shuttle_runtime::main]
 async fn main() -> shuttle_rocket::ShuttleRocket {
-    tracing_subscriber::fmt::init();
 
     let client = Client::builder()
         .pool_idle_timeout(Duration::from_secs(15))
