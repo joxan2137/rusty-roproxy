@@ -159,7 +159,12 @@ async fn handle_request(
             url.push_str(&query_string);
         }
     }
-
+    info!("Incoming request method: {:?}", method);
+    info!("Incoming request path: {:?}", path);
+    info!("Incoming request headers:");
+    for header in req.headers().iter() {
+        info!("  {}: {}", header.name(), header.value());
+    }
     info!("Full URL: {}", url);
 
     let mut request_builder = match method {
@@ -180,7 +185,7 @@ async fn handle_request(
     // Forward original headers except problematic ones
     for header in req.headers().iter() {
         let name_lower = header.name().to_string().to_lowercase();
-        if !["host", "connection", "content-length", "transfer-encoding"].contains(&name_lower.as_str()) {
+        if !["host", "connection", "content-length", "transfer-encoding", "user-agent", "roblox-id"].contains(&name_lower.as_str()) {
             debug!("Forwarding header: {} = {}", header.name(), header.value());
             request_builder = request_builder.header(header.name().as_str(), header.value());
         }
