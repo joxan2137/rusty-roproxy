@@ -23,15 +23,13 @@ impl<'r> FromRequest<'r> for MyRequestGuard<'r> {
     type Error = Infallible;
 
     async fn from_request(req: &'r Request<'_>) -> Outcome<Self, Self::Error> {
-        // SAFETY: We know that Rocket won't invalidate 'req' while it's in scope,
-        // so transmuting &'r Request<'_> to &'r Request<'r> is acceptable in this narrow case.
-        let converted: &'r Request<'r> =
-            unsafe { std::mem::transmute::<&'r Request<'_>, &'r Request<'r>>(req) };
+        let converted: &'r Request<'r> = unsafe {
+            std::mem::transmute::<&'r Request<'_>, &'r Request<'r>>(req)
+        };
         Outcome::Success(MyRequestGuard { request: converted })
     }
 }
 
-// Custom error type implementing Responder for consistent error handling.
 pub struct ErrorResponse(anyhow::Error);
 
 impl From<anyhow::Error> for ErrorResponse {
@@ -43,7 +41,6 @@ impl From<anyhow::Error> for ErrorResponse {
 impl<'r> response::Responder<'r, 'static> for ErrorResponse {
     fn respond_to(self, _: &'r Request<'_>) -> response::Result<'static> {
         error!("{:?}", self.0);
-
         Response::build()
             .status(Status::InternalServerError)
             .header(ContentType::Plain)
@@ -52,12 +49,10 @@ impl<'r> response::Responder<'r, 'static> for ErrorResponse {
     }
 }
 
-// Stores our HTTP client in Rocket state
 struct AppState {
     client: Client,
 }
 
-// Struct to capture the proxied response
 struct ProxyResponse {
     status: Status,
     content_type: String,
@@ -82,7 +77,6 @@ impl<'r> rocket::response::Responder<'r, 'static> for ProxyResponse {
     }
 }
 
-// GET route
 #[get("/<path..>?<query..>")]
 async fn get_request(
     path: PathBuf,
@@ -95,7 +89,6 @@ async fn get_request(
         .map_err(ErrorResponse)
 }
 
-// POST route
 #[post("/<path..>?<query..>", data = "<data>")]
 async fn post_request(
     path: PathBuf,
@@ -109,7 +102,6 @@ async fn post_request(
         .map_err(ErrorResponse)
 }
 
-// PUT route
 #[put("/<path..>?<query..>", data = "<data>")]
 async fn put_request(
     path: PathBuf,
@@ -123,7 +115,6 @@ async fn put_request(
         .map_err(ErrorResponse)
 }
 
-// DELETE route
 #[delete("/<path..>?<query..>")]
 async fn delete_request(
     path: PathBuf,
@@ -136,7 +127,6 @@ async fn delete_request(
         .map_err(ErrorResponse)
 }
 
-// Core proxy logic: build a request, forward it, and transform the result into a ProxyResponse.
 async fn handle_request(
     method: Method,
     path: PathBuf,
@@ -146,11 +136,13 @@ async fn handle_request(
     req: &Request<'_>,
 ) -> Result<ProxyResponse> {
     let path_str = path.to_string_lossy();
-
+    
+    // Construct the URL exactly as provided in the path
     let base_url = format!("https://www.roblox.com/{}", path_str);
-
+    
+    // Keep query parameters exactly as received
     let url = if let Some(q) = query {
-        debug!("Raw query string: {}", q);
+        info!("Query parameters: {}", q);
         format!("{}?{}", base_url, q)
     } else {
         base_url
@@ -166,74 +158,42 @@ async fn handle_request(
         _ => return Err(anyhow!("Unsupported method")),
     };
 
-    // Add some debug headers to help track the request
-    request_builder = request_builder
-        .header("Roblox-Proxy-Debug", "true")
-        .header("Accept", "*/*");
-
-    // Forward headers while excluding problematic ones
-    debug!("Forwarding headers:");
-    let excluded_headers = [
-        "host",
-        "connection",
-        "content-length",
-        "x-frame-options",
-        "transfer-encoding",
-    ];
-
+    // Forward all original headers from the client request
     for header in req.headers().iter() {
-        let name_lower = header.name().to_string().to_lowercase();
-        if !excluded_headers.contains(&name_lower.as_str()) {
-            debug!("  {}: {}", header.name(), header.value());
+        let name = header.name().to_string();
+        if !["host", "connection"].contains(&name.to_lowercase().as_str()) {
             request_builder = request_builder.header(header.name().as_str(), header.value());
+            debug!("Forwarding header: {} = {}", name, header.value());
         }
     }
 
-    // Handle request body if present
+    // Add additional headers that might be required
+    request_builder = request_builder
+        .header("Accept", "application/json")
+        .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36");
+
+    // Handle request body for POST/PUT
     if let Some(data) = data {
         let body_bytes = data
             .open(5_i32.mebibytes())
             .into_bytes()
             .await
             .context("Failed to read request body")?;
-
-        debug!("Request body size: {} bytes", body_bytes.len());
+        info!("Request body size: {} bytes", body_bytes.len());
         request_builder = request_builder.body(body_bytes.to_vec());
     }
 
-    // Add debug logging for the final request
-    debug!("Final request URL: {}", url);
-    debug!("Request headers:");
-    if let Some(headers) = request_builder
-        .try_clone()
-        .and_then(|r| r.build().ok())
-        .map(|r| r.headers().clone())
-    {
-        for (name, value) in headers.iter() {
-            debug!("  {}: {:?}", name, value);
-        }
-    }
+    // Send request with debug logging
+    info!("Sending request to: {}", url);
+    let response = request_builder
+        .send()
+        .await
+        .context("Failed to send request to Roblox API")?;
 
-    // Send the request with timeout
-    let response = match tokio::time::timeout(Duration::from_secs(30), request_builder.send()).await
-    {
-        Ok(result) => result.context("Failed to send HTTP request")?,
-        Err(_) => {
-            return Err(anyhow!("Request to Roblox timed out"));
-        }
-    };
+    let status = response.status();
+    info!("Received response with status: {}", status);
 
-    // Debug logging for response
-    debug!("Response status: {}", response.status());
-    debug!("Response headers:");
-    for (name, value) in response.headers() {
-        debug!("  {}: {:?}", name, value);
-    }
-
-    let status_code = response.status().as_u16();
-    let status = Status::from_code(status_code).unwrap_or(Status::InternalServerError);
-
-    // Extract content-type
+    // Get content type
     let content_type = response
         .headers()
         .get("content-type")
@@ -241,33 +201,31 @@ async fn handle_request(
         .unwrap_or("application/octet-stream")
         .to_string();
 
-    // Collect headers, excluding problematic ones
-    let mut response_headers = Vec::new();
-    for (name, value) in response.headers().iter() {
-        if let Ok(val_str) = value.to_str() {
-            let name_lower = name.to_string().to_lowercase();
-            if !excluded_headers.contains(&name_lower.as_str()) {
-                response_headers.push((name.to_string(), val_str.to_string()));
-            }
+    // Collect response headers
+    let headers: Vec<(String, String)> = response
+        .headers()
+        .iter()
+        .filter_map(|(name, value)| {
+            value.to_str().ok().map(|val| (name.to_string(), val.to_string()))
+        })
+        .collect();
+
+    // Read response body
+    let body = response.bytes().await.context("Failed to read response body")?;
+    info!("Response body size: {} bytes", body.len());
+
+    // Log response body for debugging if it's JSON
+    if content_type.contains("application/json") {
+        if let Ok(json_str) = String::from_utf8(body.to_vec()) {
+            info!("Response JSON: {}", json_str);
         }
     }
 
-    let body = response
-        .bytes()
-        .await
-        .context("Failed to read response body")?;
-
-    // Always log JSON responses for debugging
-    if content_type.contains("application/json") {
-        let body_str = String::from_utf8_lossy(&body);
-        debug!("Response JSON: {}", body_str);
-    }
-
     Ok(ProxyResponse {
-        status,
+        status: Status::from_code(status.as_u16()).unwrap_or(Status::InternalServerError),
         content_type,
         body: body.to_vec(),
-        headers: response_headers,
+        headers,
     })
 }
 
@@ -277,7 +235,7 @@ async fn main() -> shuttle_rocket::ShuttleRocket {
         .pool_idle_timeout(Duration::from_secs(15))
         .pool_max_idle_per_host(10)
         .timeout(Duration::from_secs(30))
-        .user_agent("RobloxProxy/1.0")
+        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
         .build()
         .context("Failed to create HTTP client")?;
 
@@ -289,10 +247,10 @@ async fn main() -> shuttle_rocket::ShuttleRocket {
             routes![get_request, post_request, put_request, delete_request],
         )
         .manage(state)
-        .configure(rocket::Config::figment().merge((
-            "limits",
-            rocket::data::Limits::new().limit("data-form", 5_i32.mebibytes()),
-        )));
+        .configure(
+            rocket::Config::figment()
+                .merge(("limits", rocket::data::Limits::new().limit("data-form", 5_i32.mebibytes()))),
+        );
 
     Ok(rocket.into())
 }
