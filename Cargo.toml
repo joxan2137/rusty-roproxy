@@ -7,8 +7,8 @@ edition = "2021"
 
 [dependencies]
 rocket = { version = "0.5.0-rc.3", features = ["json"] }
-shuttle-rocket = "0.31.0"
-shuttle-runtime = "0.31.0"
+shuttle-rocket = "*"
+shuttle-runtime = "*"
 tokio = { version = "1.29.1", features = ["full"] }
 reqwest = "*"
 tracing = "*"
