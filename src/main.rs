@@ -10,7 +10,7 @@ use rocket::{
     response::{self, Response},
     routes, Data, Request, State,
 };
-use std::{convert::Infallible, io::Cursor, path::PathBuf, time::Duration};
+use std::{collections::HashMap, convert::Infallible, io::Cursor, path::PathBuf, time::Duration};
 use tracing::{debug, error, info};
 
 // A custom guard that holds the entire Request and passes it along.
@@ -84,52 +84,52 @@ impl<'r> rocket::response::Responder<'r, 'static> for ProxyResponse {
     }
 }
 
-#[get("/<path..>?<query..>")]
+#[get("/<path..>?<params..>")]
 async fn get_request(
     path: PathBuf,
-    query: Option<String>,
+    params: HashMap<String, String>,
     state: &State<AppState>,
     guard: MyRequestGuard<'_>,
 ) -> Result<ProxyResponse, ErrorResponse> {
-    handle_request(Method::Get, path, query, None, state, guard.request)
+    handle_request(Method::Get, path, Some(params), None, state, guard.request)
         .await
         .map_err(ErrorResponse)
 }
 
-#[post("/<path..>?<query..>", data = "<data>")]
+#[post("/<path..>?<params..>", data = "<data>")]
 async fn post_request(
     path: PathBuf,
-    query: Option<String>,
+    params: HashMap<String, String>,
     data: Data<'_>,
     state: &State<AppState>,
     guard: MyRequestGuard<'_>,
 ) -> Result<ProxyResponse, ErrorResponse> {
-    handle_request(Method::Post, path, query, Some(data), state, guard.request)
+    handle_request(Method::Post, path, Some(params), Some(data), state, guard.request)
         .await
         .map_err(ErrorResponse)
 }
 
-#[put("/<path..>?<query..>", data = "<data>")]
+#[put("/<path..>?<params..>", data = "<data>")]
 async fn put_request(
     path: PathBuf,
-    query: Option<String>,
+    params: HashMap<String, String>,
     data: Data<'_>,
     state: &State<AppState>,
     guard: MyRequestGuard<'_>,
 ) -> Result<ProxyResponse, ErrorResponse> {
-    handle_request(Method::Put, path, query, Some(data), state, guard.request)
+    handle_request(Method::Put, path, Some(params), Some(data), state, guard.request)
         .await
         .map_err(ErrorResponse)
 }
 
-#[delete("/<path..>?<query..>")]
+#[delete("/<path..>?<params..>")]
 async fn delete_request(
     path: PathBuf,
-    query: Option<String>,
+    params: HashMap<String, String>,
     state: &State<AppState>,
     guard: MyRequestGuard<'_>,
 ) -> Result<ProxyResponse, ErrorResponse> {
-    handle_request(Method::Delete, path, query, None, state, guard.request)
+    handle_request(Method::Delete, path, Some(params), None, state, guard.request)
         .await
         .map_err(ErrorResponse)
 }
@@ -137,24 +137,28 @@ async fn delete_request(
 async fn handle_request(
     method: Method,
     path: PathBuf,
-    query: Option<String>,
+    query_params: Option<HashMap<String, String>>,
     data: Option<Data<'_>>,
     state: &State<AppState>,
     req: &Request<'_>,
 ) -> Result<ProxyResponse> {
     let path_str = path.to_string_lossy();
     
-    if query.is_some() {
-        println!("Query Arguemnts: {}", query.clone().unwrap());
-    }
+    // Build URL with query parameters
+    let mut url = format!("https://www.roblox.com/{}", path_str);
     
-    // Build the URL with query parameters
-    let url = if let Some(q) = query {
-        info!("Query parameters: {}", q);
-        format!("https://www.roblox.com/{}?{}", path_str, q)
-    } else {
-        format!("https://www.roblox.com/{}", path_str)
-    };
+    if let Some(params) = query_params {
+        if !params.is_empty() {
+            info!("Query parameters: {:?}", params);
+            let query_string: String = params
+                .iter()
+                .map(|(k, v)| format!("{}={}", k, v))
+                .collect::<Vec<_>>()
+                .join("&");
+            url.push('?');
+            url.push_str(&query_string);
+        }
+    }
 
     info!("Full URL: {}", url);
 
