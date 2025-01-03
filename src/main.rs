@@ -137,18 +137,17 @@ async fn handle_request(
 ) -> Result<ProxyResponse> {
     let path_str = path.to_string_lossy();
     
-    // Construct the URL exactly as provided in the path
-    let base_url = format!("https://www.roblox.com/{}", path_str);
+    // Change this line to prepend "/users" to maintain the full path
+    let mut url = format!("https://www.roblox.com/{}", path_str);
     
-    // Keep query parameters exactly as received
-    let url = if let Some(q) = query {
-        info!("Query parameters: {}", q);
-        format!("{}?{}", base_url, q)
-    } else {
-        base_url
-    };
+    // Add query parameters
+    if let Some(q) = query {
+        info!("Adding query parameters: {}", q);
+        url.push('?');
+        url.push_str(&q);
+    }
 
-    info!("Proxying {:?} request to: {}", method, url);
+    info!("Full URL: {}", url);
 
     let mut request_builder = match method {
         Method::Get => state.client.get(&url),
@@ -158,63 +157,53 @@ async fn handle_request(
         _ => return Err(anyhow!("Unsupported method")),
     };
 
-    // Forward all original headers from the client request
+    // Set required headers
+    request_builder = request_builder
+        .header("Accept", "application/json")
+        .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+        .header("Referer", "https://www.roblox.com")
+        .header("Origin", "https://www.roblox.com");
+
+    // Forward headers from original request
     for header in req.headers().iter() {
-        let name = header.name().to_string();
-        if !["host", "connection"].contains(&name.to_lowercase().as_str()) {
+        let name_lower = header.name().to_string().to_lowercase();
+        if !["host", "connection", "content-length", "x-frame-options"].contains(&name_lower.as_str()) {
+            debug!("Forwarding header: {} = {}", header.name(), header.value());
             request_builder = request_builder.header(header.name().as_str(), header.value());
-            debug!("Forwarding header: {} = {}", name, header.value());
         }
     }
 
-    // Add additional headers that might be required
-    request_builder = request_builder
-        .header("Accept", "application/json")
-        .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36");
-
-    // Handle request body for POST/PUT
-    if let Some(data) = data {
-        let body_bytes = data
-            .open(5_i32.mebibytes())
-            .into_bytes()
-            .await
-            .context("Failed to read request body")?;
-        info!("Request body size: {} bytes", body_bytes.len());
-        request_builder = request_builder.body(body_bytes.to_vec());
-    }
-
-    // Send request with debug logging
-    info!("Sending request to: {}", url);
+    info!("Sending request to Roblox API...");
     let response = request_builder
         .send()
         .await
-        .context("Failed to send request to Roblox API")?;
+        .context("Failed to send request")?;
 
     let status = response.status();
-    info!("Received response with status: {}", status);
+    info!("Received response status: {}", status);
 
-    // Get content type
-    let content_type = response
-        .headers()
-        .get("content-type")
-        .and_then(|val| val.to_str().ok())
-        .unwrap_or("application/octet-stream")
-        .to_string();
-
-    // Collect response headers
     let headers: Vec<(String, String)> = response
         .headers()
         .iter()
         .filter_map(|(name, value)| {
-            value.to_str().ok().map(|val| (name.to_string(), val.to_string()))
+            if let Ok(val) = value.to_str() {
+                Some((name.to_string(), val.to_string()))
+            } else {
+                None
+            }
         })
         .collect();
 
-    // Read response body
+    let content_type = response
+        .headers()
+        .get("content-type")
+        .and_then(|val| val.to_str().ok())
+        .unwrap_or("application/json")
+        .to_string();
+
     let body = response.bytes().await.context("Failed to read response body")?;
     info!("Response body size: {} bytes", body.len());
 
-    // Log response body for debugging if it's JSON
     if content_type.contains("application/json") {
         if let Ok(json_str) = String::from_utf8(body.to_vec()) {
             info!("Response JSON: {}", json_str);
