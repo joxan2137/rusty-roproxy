@@ -148,7 +148,27 @@ async fn handle_request(
     req: &Request<'_>,
 ) -> Result<ProxyResponse> {
     let path_str = path.to_string_lossy();
-    let url = format!("https://www.roblox.com/{}", path_str);
+    let mut url = format!("https://www.roblox.com/{}", path_str);
+
+    // Improved query parameter handling
+    if let Some(q) = query {
+        debug!("Raw query string: {}", q);
+        
+        // Parse the query string properly
+        let query_pairs: Vec<(String, String)> = form_urlencoded::parse(q.as_bytes())
+            .map(|(k, v)| (k.into_owned(), v.into_owned()))
+            .collect();
+        
+        debug!("Parsed query parameters:");
+        for (key, value) in &query_pairs {
+            debug!("  {} = {}", key, value);
+        }
+
+        // Append query string to URL
+        if !q.is_empty() {
+            url = format!("{}?{}", url, q);
+        }
+    }
 
     info!("Proxying {:?} request to: {}", method, url);
 
@@ -160,17 +180,19 @@ async fn handle_request(
         _ => return Err(anyhow!("Unsupported method")),
     };
 
-    if let Some(q) = query {
-        debug!("Query: {}", q);
-        request_builder = request_builder.query(&[("q", q)]);
-    }
-
-    // Forward headers
+    // Forward headers while excluding problematic ones
     debug!("Forwarding headers:");
+    let excluded_headers = [
+        "host",
+        "connection",
+        "content-length",
+        "x-frame-options", // Exclude X-Frame-Options to prevent warning
+        "transfer-encoding",
+    ];
+
     for header in req.headers().iter() {
         let name_lower = header.name().to_string().to_lowercase();
-        // Skip certain hop-by-hop headers
-        if !["host", "connection", "content-length"].contains(&&*name_lower) {
+        if !excluded_headers.contains(&name_lower.as_str()) {
             debug!("  {}: {}", header.name(), header.value());
             request_builder = request_builder.header(header.name().as_str(), header.value());
         }
@@ -209,13 +231,12 @@ async fn handle_request(
     debug!("Response status code: {}", status_code);
     debug!("Response Content-Type: {}", content_type);
 
-    // Collect headers
+    // Collect headers, excluding problematic ones
     let mut response_headers = Vec::new();
     for (name, value) in response.headers().iter() {
         if let Ok(val_str) = value.to_str() {
             let name_lower = name.to_string().to_lowercase();
-            // Exclude hop-by-hop headers
-            if !["connection", "transfer-encoding"].contains(&&*name_lower) {
+            if !excluded_headers.contains(&name_lower.as_str()) {
                 response_headers.push((name.to_string(), val_str.to_string()));
             }
         }
@@ -240,7 +261,6 @@ async fn handle_request(
 // Shuttle integration
 #[shuttle_runtime::main]
 async fn main() -> shuttle_rocket::ShuttleRocket {
-
     let client = Client::builder()
         .pool_idle_timeout(Duration::from_secs(15))
         .pool_max_idle_per_host(10)

@@ -1969,6 +1969,7 @@ name = "rusty-roproxy"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "form_urlencoded",
  "reqwest 0.12.12",
  "rocket",
  "shuttle-rocket",

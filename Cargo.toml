@@ -14,3 +14,4 @@ reqwest = "*"
 tracing = "*"
 tracing-subscriber = { version = "*", features = ["env-filter"] }
 anyhow = "*"
+form_urlencoded = "*"
