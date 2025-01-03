@@ -144,6 +144,10 @@ async fn handle_request(
 ) -> Result<ProxyResponse> {
     let path_str = path.to_string_lossy();
     
+    if query.is_some() {
+        println!("Query Arguemnts: {}", query.clone().unwrap());
+    }
+    
     // Build the URL with query parameters
     let url = if let Some(q) = query {
         info!("Query parameters: {}", q);
