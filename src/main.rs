@@ -64,15 +64,22 @@ impl<'r> rocket::response::Responder<'r, 'static> for ProxyResponse {
     fn respond_to(self, _: &'r Request<'_>) -> rocket::response::Result<'static> {
         let mut response = Response::build();
         response.status(self.status);
-        response.sized_body(self.body.len(), Cursor::new(self.body));
-
+        
+        // Set Content-Length header explicitly
+        response.raw_header("Content-Length", self.body.len().to_string());
+        
         if let Some(ct) = ContentType::parse_flexible(&self.content_type) {
             response.header(ct);
         }
 
+        // Add all other headers except content-length
         for (name, value) in self.headers {
-            response.header(Header::new(name, value));
+            if name.to_lowercase() != "content-length" {
+                response.header(Header::new(name, value));
+            }
         }
+
+        response.sized_body(self.body.len(), Cursor::new(self.body));
         response.ok()
     }
 }
@@ -137,15 +144,13 @@ async fn handle_request(
 ) -> Result<ProxyResponse> {
     let path_str = path.to_string_lossy();
     
-    // Change this line to prepend "/users" to maintain the full path
-    let mut url = format!("https://www.roblox.com/{}", path_str);
-    
-    // Add query parameters
-    if let Some(q) = query {
-        info!("Adding query parameters: {}", q);
-        url.push('?');
-        url.push_str(&q);
-    }
+    // Build the URL with query parameters
+    let url = if let Some(q) = query {
+        info!("Query parameters: {}", q);
+        format!("https://www.roblox.com/{}?{}", path_str, q)
+    } else {
+        format!("https://www.roblox.com/{}", path_str)
+    };
 
     info!("Full URL: {}", url);
 
@@ -164,13 +169,25 @@ async fn handle_request(
         .header("Referer", "https://www.roblox.com")
         .header("Origin", "https://www.roblox.com");
 
-    // Forward headers from original request
+    // Forward original headers except problematic ones
     for header in req.headers().iter() {
         let name_lower = header.name().to_string().to_lowercase();
-        if !["host", "connection", "content-length", "x-frame-options"].contains(&name_lower.as_str()) {
+        if !["host", "connection", "content-length", "transfer-encoding"].contains(&name_lower.as_str()) {
             debug!("Forwarding header: {} = {}", header.name(), header.value());
             request_builder = request_builder.header(header.name().as_str(), header.value());
         }
+    }
+
+    // Handle request body if present
+    if let Some(data) = data {
+        let body_bytes = data
+            .open(5_i32.mebibytes())
+            .into_bytes()
+            .await
+            .context("Failed to read request body")?;
+        
+        debug!("Request body size: {} bytes", body_bytes.len());
+        request_builder = request_builder.body(body_bytes.to_vec());
     }
 
     info!("Sending request to Roblox API...");
@@ -182,18 +199,7 @@ async fn handle_request(
     let status = response.status();
     info!("Received response status: {}", status);
 
-    let headers: Vec<(String, String)> = response
-        .headers()
-        .iter()
-        .filter_map(|(name, value)| {
-            if let Ok(val) = value.to_str() {
-                Some((name.to_string(), val.to_string()))
-            } else {
-                None
-            }
-        })
-        .collect();
-
+    // Get content type and headers before consuming response
     let content_type = response
         .headers()
         .get("content-type")
@@ -201,20 +207,38 @@ async fn handle_request(
         .unwrap_or("application/json")
         .to_string();
 
+    // Filter and collect headers
+    let response_headers: Vec<(String, String)> = response
+        .headers()
+        .iter()
+        .filter_map(|(name, value)| {
+            if let Ok(val_str) = value.to_str() {
+                let name_lower = name.to_string().to_lowercase();
+                if !["transfer-encoding", "connection"].contains(&name_lower.as_str()) {
+                    Some((name.to_string(), val_str.to_string()))
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    // Get the response body
     let body = response.bytes().await.context("Failed to read response body")?;
     info!("Response body size: {} bytes", body.len());
 
-    if content_type.contains("application/json") {
-        if let Ok(json_str) = String::from_utf8(body.to_vec()) {
-            info!("Response JSON: {}", json_str);
-        }
+    if let Ok(json_str) = String::from_utf8(body.to_vec()) {
+        info!("Response body: {}", json_str);
     }
 
+    // Create response
     Ok(ProxyResponse {
         status: Status::from_code(status.as_u16()).unwrap_or(Status::InternalServerError),
         content_type,
         body: body.to_vec(),
-        headers,
+        headers: response_headers,
     })
 }
 
@@ -224,7 +248,7 @@ async fn main() -> shuttle_rocket::ShuttleRocket {
         .pool_idle_timeout(Duration::from_secs(15))
         .pool_max_idle_per_host(10)
         .timeout(Duration::from_secs(30))
-        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
+        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
         .build()
         .context("Failed to create HTTP client")?;
 
