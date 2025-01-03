@@ -14,7 +14,6 @@ use std::{convert::Infallible, io::Cursor, path::PathBuf, time::Duration};
 use tracing::{debug, error, info};
 
 // A custom guard that holds the entire Request and passes it along.
-// We rely on `transmute` in from_request to convert &'r Request<'_> to &'r Request<'r>.
 struct MyRequestGuard<'r> {
     request: &'r Request<'r>,
 }
@@ -24,11 +23,10 @@ impl<'r> FromRequest<'r> for MyRequestGuard<'r> {
     type Error = Infallible;
 
     async fn from_request(req: &'r Request<'_>) -> Outcome<Self, Self::Error> {
-        // SAFETY: We know that Rocket won't invalidate 'req' while it’s in scope,
+        // SAFETY: We know that Rocket won't invalidate 'req' while it's in scope,
         // so transmuting &'r Request<'_> to &'r Request<'r> is acceptable in this narrow case.
-        let converted: &'r Request<'r> = unsafe {
-            std::mem::transmute::<&'r Request<'_>, &'r Request<'r>>(req)
-        };
+        let converted: &'r Request<'r> =
+            unsafe { std::mem::transmute::<&'r Request<'_>, &'r Request<'r>>(req) };
         Outcome::Success(MyRequestGuard { request: converted })
     }
 }
@@ -148,27 +146,15 @@ async fn handle_request(
     req: &Request<'_>,
 ) -> Result<ProxyResponse> {
     let path_str = path.to_string_lossy();
-    let mut url = format!("https://www.roblox.com/{}", path_str);
 
-    // Improved query parameter handling
-    if let Some(q) = query {
+    let base_url = format!("https://www.roblox.com/{}", path_str);
+
+    let url = if let Some(q) = query {
         debug!("Raw query string: {}", q);
-        
-        // Parse the query string properly
-        let query_pairs: Vec<(String, String)> = form_urlencoded::parse(q.as_bytes())
-            .map(|(k, v)| (k.into_owned(), v.into_owned()))
-            .collect();
-        
-        debug!("Parsed query parameters:");
-        for (key, value) in &query_pairs {
-            debug!("  {} = {}", key, value);
-        }
-
-        // Append query string to URL
-        if !q.is_empty() {
-            url = format!("{}?{}", url, q);
-        }
-    }
+        format!("{}?{}", base_url, q)
+    } else {
+        base_url
+    };
 
     info!("Proxying {:?} request to: {}", method, url);
 
@@ -180,13 +166,18 @@ async fn handle_request(
         _ => return Err(anyhow!("Unsupported method")),
     };
 
+    // Add some debug headers to help track the request
+    request_builder = request_builder
+        .header("Roblox-Proxy-Debug", "true")
+        .header("Accept", "*/*");
+
     // Forward headers while excluding problematic ones
     debug!("Forwarding headers:");
     let excluded_headers = [
         "host",
         "connection",
         "content-length",
-        "x-frame-options", // Exclude X-Frame-Options to prevent warning
+        "x-frame-options",
         "transfer-encoding",
     ];
 
@@ -198,7 +189,7 @@ async fn handle_request(
         }
     }
 
-    // Read and forward body if present
+    // Handle request body if present
     if let Some(data) = data {
         let body_bytes = data
             .open(5_i32.mebibytes())
@@ -206,16 +197,38 @@ async fn handle_request(
             .await
             .context("Failed to read request body")?;
 
+        debug!("Request body size: {} bytes", body_bytes.len());
         request_builder = request_builder.body(body_bytes.to_vec());
     }
 
-    // Timeout for external call
-    let response = match tokio::time::timeout(Duration::from_secs(30), request_builder.send()).await {
+    // Add debug logging for the final request
+    debug!("Final request URL: {}", url);
+    debug!("Request headers:");
+    if let Some(headers) = request_builder
+        .try_clone()
+        .and_then(|r| r.build().ok())
+        .map(|r| r.headers().clone())
+    {
+        for (name, value) in headers.iter() {
+            debug!("  {}: {:?}", name, value);
+        }
+    }
+
+    // Send the request with timeout
+    let response = match tokio::time::timeout(Duration::from_secs(30), request_builder.send()).await
+    {
         Ok(result) => result.context("Failed to send HTTP request")?,
         Err(_) => {
             return Err(anyhow!("Request to Roblox timed out"));
         }
     };
+
+    // Debug logging for response
+    debug!("Response status: {}", response.status());
+    debug!("Response headers:");
+    for (name, value) in response.headers() {
+        debug!("  {}: {:?}", name, value);
+    }
 
     let status_code = response.status().as_u16();
     let status = Status::from_code(status_code).unwrap_or(Status::InternalServerError);
@@ -228,9 +241,6 @@ async fn handle_request(
         .unwrap_or("application/octet-stream")
         .to_string();
 
-    debug!("Response status code: {}", status_code);
-    debug!("Response Content-Type: {}", content_type);
-
     // Collect headers, excluding problematic ones
     let mut response_headers = Vec::new();
     for (name, value) in response.headers().iter() {
@@ -242,12 +252,15 @@ async fn handle_request(
         }
     }
 
-    let body = response.bytes().await.context("Failed to read response body")?;
-    debug!("Response body length: {} bytes", body.len());
+    let body = response
+        .bytes()
+        .await
+        .context("Failed to read response body")?;
 
-    // If it's JSON, we show a preview for debugging
+    // Always log JSON responses for debugging
     if content_type.contains("application/json") {
-        debug!("JSON body preview: {}", String::from_utf8_lossy(&body));
+        let body_str = String::from_utf8_lossy(&body);
+        debug!("Response JSON: {}", body_str);
     }
 
     Ok(ProxyResponse {
@@ -258,7 +271,6 @@ async fn handle_request(
     })
 }
 
-// Shuttle integration
 #[shuttle_runtime::main]
 async fn main() -> shuttle_rocket::ShuttleRocket {
     let client = Client::builder()
@@ -277,10 +289,10 @@ async fn main() -> shuttle_rocket::ShuttleRocket {
             routes![get_request, post_request, put_request, delete_request],
         )
         .manage(state)
-        .configure(
-            rocket::Config::figment()
-                .merge(("limits", rocket::data::Limits::new().limit("data-form", 5_i32.mebibytes()))),
-        );
+        .configure(rocket::Config::figment().merge((
+            "limits",
+            rocket::data::Limits::new().limit("data-form", 5_i32.mebibytes()),
+        )));
 
     Ok(rocket.into())
 }
