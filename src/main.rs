@@ -65,14 +65,12 @@ impl<'r> rocket::response::Responder<'r, 'static> for ProxyResponse {
         let mut response = Response::build();
         response.status(self.status);
         
-        // Set Content-Length header explicitly
         response.raw_header("Content-Length", self.body.len().to_string());
         
         if let Some(ct) = ContentType::parse_flexible(&self.content_type) {
             response.header(ct);
         }
 
-        // Add all other headers except content-length
         for (name, value) in self.headers {
             if name.to_lowercase() != "content-length" {
                 response.header(Header::new(name, value));
@@ -144,7 +142,6 @@ async fn handle_request(
 ) -> Result<ProxyResponse> {
     let path_str = path.to_string_lossy();
     
-    // Build URL with query parameters
     let mut url = format!("https://www.roblox.com/{}", path_str);
     
     if let Some(params) = query_params {
@@ -159,12 +156,12 @@ async fn handle_request(
             url.push_str(&query_string);
         }
     }
-    info!("Incoming request method: {:?}", method);
-    info!("Incoming request path: {:?}", path);
-    info!("Incoming request headers:");
-    for header in req.headers().iter() {
-        info!("  {}: {}", header.name(), header.value());
-    }
+    // info!("Incoming request method: {:?}", method);
+    // info!("Incoming request path: {:?}", path);
+    // info!("Incoming request headers:");
+    // for header in req.headers().iter() {
+    //     info!("  {}: {}", header.name(), header.value());
+    // }
     info!("Full URL: {}", url);
 
     let mut request_builder = match method {
@@ -175,14 +172,12 @@ async fn handle_request(
         _ => return Err(anyhow!("Unsupported method")),
     };
 
-    // Set required headers
     request_builder = request_builder
         .header("Accept", "application/json")
         .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
         .header("Referer", "https://www.roblox.com")
         .header("Origin", "https://www.roblox.com");
 
-    // Forward original headers except problematic ones
     for header in req.headers().iter() {
         let name_lower = header.name().to_string().to_lowercase();
         if !["host", "connection", "content-length", "transfer-encoding", "user-agent", "roblox-id"].contains(&name_lower.as_str()) {
@@ -191,7 +186,6 @@ async fn handle_request(
         }
     }
 
-    // Handle request body if present
     if let Some(data) = data {
         let body_bytes = data
             .open(5_i32.mebibytes())
@@ -212,7 +206,6 @@ async fn handle_request(
     let status = response.status();
     info!("Received response status: {}", status);
 
-    // Get content type and headers before consuming response
     let content_type = response
         .headers()
         .get("content-type")
@@ -220,7 +213,6 @@ async fn handle_request(
         .unwrap_or("application/json")
         .to_string();
 
-    // Filter and collect headers
     let response_headers: Vec<(String, String)> = response
         .headers()
         .iter()
@@ -238,15 +230,13 @@ async fn handle_request(
         })
         .collect();
 
-    // Get the response body
     let body = response.bytes().await.context("Failed to read response body")?;
     info!("Response body size: {} bytes", body.len());
 
-    if let Ok(json_str) = String::from_utf8(body.to_vec()) {
-        info!("Response body: {}", json_str);
-    }
+    // if let Ok(json_str) = String::from_utf8(body.to_vec()) {
+    //     info!("Response body: {}", json_str);
+    // }
 
-    // Create response
     Ok(ProxyResponse {
         status: Status::from_code(status.as_u16()).unwrap_or(Status::InternalServerError),
         content_type,
